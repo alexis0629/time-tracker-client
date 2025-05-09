@@ -2,18 +2,21 @@ import sqlite3
 import threading
 import time
 import schedule
-import datetime
+import requests
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from pynput import keyboard, mouse
 import pygetwindow as gw
 
 DB_NAME = "activity_log.db"
+SERVER_URL = "http://127.0.0.1:8000/log"
 USER_ID = "user123"  # this should be dynamic in real use
 
 # Thresholds
 KEYBOARD_THRESHOLD = 5
 MOUSE_THRESHOLD = 5
 WINDOW_THRESHOLD = 1
-LOG_INTERVAL = 60  # 1 minutes in seconds
+LOG_INTERVAL = 10  # 1 minutes in seconds
 
 # Globals to count activity
 keyboard_count = 0
@@ -38,14 +41,15 @@ def setup_db():
 
 def log_work_session(hours=0.1):
     conn = sqlite3.connect(DB_NAME)
+    japan_time = datetime.now(ZoneInfo("Asia/Tokyo"))
     c = conn.cursor()
     c.execute('''
         INSERT INTO logs (user_id, timestamp, hours, synced)
         VALUES (?, ?, ?, 0)
-    ''', (USER_ID, datetime.datetime.utcnow(), hours))
+    ''', (USER_ID, japan_time, hours))
     conn.commit()
     conn.close()
-    print(f"[LOGGED] {hours} hr at {datetime.datetime.utcnow()}")
+    print(f"[LOGGED] {hours} hr at {japan_time}")
 
 def evaluate_activity():
     global keyboard_count, mouse_click_count, window_switch_count
@@ -91,17 +95,39 @@ def window_checker():
         time.sleep(2)  # Check every 2 seconds
 
 def sync_with_server():
-    # Placeholder for actual sync code (e.g., POST to your server)
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    c.execute("SELECT * FROM logs WHERE synced = 0")
-    unsynced = c.fetchall()
+    c.execute("SELECT id, user_id, timestamp, hours FROM logs WHERE synced = 0")
+    unsynced_logs = c.fetchall()
 
-    if unsynced:
-        print(f"[SYNC] Sending {len(unsynced)} records to server...")
-        # Simulate success
-        c.execute("UPDATE logs SET synced = 1 WHERE synced = 0")
+    if not unsynced_logs:
+        conn.close()
+        print("[SYNC] No new logs to sync.")
+        return
+
+    print(f"[SYNC] Attempting to send {len(unsynced_logs)} log(s)...")
+
+    success_ids = []
+
+    for log_id, user_id, timestamp, hours in unsynced_logs:
+        payload = {
+            "user_id": user_id,
+            "timestamp": timestamp,
+            "hours": hours
+        }
+
+        try:
+            response = requests.post(SERVER_URL, json=payload, timeout=5)
+            if response.status_code == 200:
+                success_ids.append((log_id,))
+        except requests.RequestException as e:
+            print(f"[ERROR] Failed to sync log {log_id}: {e}")
+
+    if success_ids:
+        c.executemany("UPDATE logs SET synced = 1 WHERE id = ?", success_ids)
         conn.commit()
+        print(f"[SYNC] Synced {len(success_ids)} log(s).")
+
     conn.close()
 
 def main():
@@ -111,7 +137,7 @@ def main():
     threading.Thread(target=window_checker, daemon=True).start()
 
     schedule.every(LOG_INTERVAL).seconds.do(evaluate_activity)
-    schedule.every(5).minutes.do(sync_with_server)  # adjust as needed
+    schedule.every(1).minutes.do(sync_with_server)  # adjust as needed
 
     while True:
         schedule.run_pending()
